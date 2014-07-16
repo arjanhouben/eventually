@@ -47,6 +47,8 @@ void playback( istream &input )
 	}
 }
 
+CGPoint pos { 0, 0 };
+
 CGEventRef eventCallback( CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *userInfo )
 {
 	auto &output = *reinterpret_cast< ostream* >( userInfo );
@@ -56,6 +58,13 @@ CGEventRef eventCallback( CGEventTapProxy proxy, CGEventType type, CGEventRef ev
 		CFRunLoopStop( CFRunLoopGetCurrent() );
 		return nullptr;
 	}
+	
+	pos.x += CGEventGetDoubleValueField( event, kCGMouseEventDeltaX );
+	pos.y += CGEventGetDoubleValueField( event, kCGMouseEventDeltaY );
+	if ( pos.x < 0 ) pos.x = 0;
+	if ( pos.y < 0 ) pos.y = 0;
+//	cerr << pos.x << "x" << pos.y << endl;
+	CGEventSetLocation( event, pos );
 	
 	auto data = scoped( CGEventCreateData( nullptr, event ), &CFRelease );
 	size_t size = CFDataGetLength( data );
@@ -69,12 +78,19 @@ CGEventRef eventCallback( CGEventTapProxy proxy, CGEventType type, CGEventRef ev
 	output.write( reinterpret_cast< const char* >( buffer.data() ), buffer.size() );
 	
 	output.flush();
+
 	
 	return nullptr;
 }
 
 void record( ostream &output )
 {
+	CGAssociateMouseAndMouseCursorPosition( true ) && error( "could not disconnect cursor" );
+	CGDirectDisplayID display;
+	uint32_t count = 0;
+	CGGetActiveDisplayList( 1, &display, &count );
+	count || error( "could not get active display" );
+	CGDisplayMoveCursorToPoint( display, { 0, 0 } );
 	CGDisplayHideCursor( kCGDirectMainDisplay ) && error( "could not hide cursor" );
 	
 	auto eventMask = ~0;

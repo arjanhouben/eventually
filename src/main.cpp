@@ -144,7 +144,6 @@ struct Display
 	{
 		CGEventSetLocation( event, clamp( p ) );
 		sendData( event, output );
-		return event;
 		return nullptr;
 	}
 	

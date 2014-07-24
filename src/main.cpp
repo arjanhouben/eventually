@@ -24,6 +24,7 @@ ifstream inputFile;
 struct Display;
 vector< unique_ptr< Display > > displays;
 Display *currentDisplay;
+bool ignoreNextDelta = false;
 
 bool error( const string &err )
 {
@@ -110,38 +111,19 @@ void showMouse()
     CGDisplayShowCursor( kCGDirectMainDisplay );
 }
 
-void onDisplayChange()
-{
-//	uint32_t displayCount = 0;
-//	CGGetOnlineDisplayList( 0, nullptr, &displayCount ) && error( "could not get display count" );
-//	displays.resize( displayCount );
-//	CGGetOnlineDisplayList( displays.size(), displays.data(), &displayCount ) && error( "could not get display count" );
-}
-
-void onDisplayChange( CGDirectDisplayID, CGDisplayChangeSummaryFlags, void* )
-{
-	onDisplayChange();
-}
-
 struct Display;
 
 class Boundry
 {
 	public:
 		Boundry( Display &dest ) :
-			dest_( dest ) {}
+			destination( dest ) {}
 	
-		Display& destination() const
-		{
-			return dest_;
-		}
+		Display& destination;
 	
 		virtual ~Boundry() {}
-		virtual bool isMouseOn( const Display &, CGPoint ) const = 0;
-		virtual Display* didMouseLeave( CGPoint, CGPoint ) const = 0;
+		virtual Display* didMouseLeave( const Display&, CGPoint&, CGPoint ) const = 0;
 	private:
-		
-		Display &dest_;
 };
 
 struct Display
@@ -162,19 +144,17 @@ struct Display
 	{
 		CGEventSetLocation( event, clamp( p ) );
 		sendData( event, output );
+		return event;
 		return nullptr;
 	}
 	
-	Display* didMouseLeave( const CGPoint &pos, const CGPoint&delta ) const
+	Display* didMouseLeave( CGPoint &pos, const CGPoint&delta ) const
 	{
 		for ( auto &b : boundries )
 		{
-			if ( b->isMouseOn( *this, pos ) )
+			if ( auto result = b->didMouseLeave( *this, pos, delta ) )
 			{
-				if ( auto result = b->didMouseLeave( pos, delta ) )
-				{
-					return result;
-				}
+				return result;
 			}
 		}
 		return nullptr;
@@ -191,7 +171,7 @@ struct Display
 	{
 	}
 	
-	virtual void enterScreen()
+	virtual void enterScreen( CGPoint pos, CGEventRef event )
 	{
 	}
 };
@@ -200,8 +180,9 @@ struct HostDisplay : Display
 {
 	HostDisplay( double w, double h, const string &n ) : Display( w, h, n ) {}
 	
-	virtual CGEventRef handle( CGPoint&, CGEventRef event ) override final
+	virtual CGEventRef handle( CGPoint&pos, CGEventRef event ) override final
 	{
+		pos = CGEventGetLocation( event );
 		return event;
 	}
 	
@@ -210,9 +191,12 @@ struct HostDisplay : Display
 		hideMouseHack();
 	}
 	
-	virtual void enterScreen() override final
+	virtual void enterScreen( CGPoint pos, CGEventRef event ) override final
 	{
 		showMouse();
+		CGDisplayMoveCursorToPoint( kCGDirectMainDisplay, pos );
+		CGEventSetLocation( event, pos );
+		ignoreNextDelta = true;
 	}
 };
 
@@ -220,14 +204,17 @@ struct TopBoundry : Boundry
 {
 	TopBoundry( Display &dest ) : Boundry( dest ) {}
 	
-	bool isMouseOn( const Display &dsp, CGPoint p ) const override final
+	Display* didMouseLeave( const Display &dsp, CGPoint &p, CGPoint d ) const override final
 	{
-		return p.y <= 1;
-	}
-	
-	Display* didMouseLeave( CGPoint, CGPoint d ) const override final
-	{
-		return ( d.y < -50 ) ? &destination() : nullptr;
+		if ( p.y <= 1 )
+		{
+			if ( d.y < -50 )
+			{
+				p.y += dsp.height;
+				return &destination;
+			}
+		}
+		return nullptr;
 	}
 };
 
@@ -235,14 +222,17 @@ struct BottomBoundry : Boundry
 {
 	BottomBoundry( Display &dest ) : Boundry( dest ) {}
 	
-	bool isMouseOn( const Display &dsp, CGPoint p ) const override final
+	Display* didMouseLeave( const Display &dsp, CGPoint &p, CGPoint d ) const override final
 	{
-		return p.y >= dsp.height - 1;
-	}
-	
-	Display* didMouseLeave( CGPoint, CGPoint d ) const override final
-	{
-		return ( d.y > 50 ) ? &destination() : nullptr;
+		if ( p.y >= dsp.height - 1 )
+		{
+			if ( d.y > 50 )
+			{
+				p.y -= dsp.height;
+				return &destination;
+			}
+		}
+		return nullptr;
 	}
 };
 
@@ -250,14 +240,17 @@ struct RightBoundry : Boundry
 {
 	RightBoundry( Display &dest ) : Boundry( dest ) {}
 	
-	bool isMouseOn( const Display &dsp, CGPoint p ) const override final
+	Display* didMouseLeave( const Display &dsp, CGPoint &p, CGPoint d ) const override final
 	{
-		return p.x >= dsp.width - 1;
-	}
-	
-	Display* didMouseLeave( CGPoint, CGPoint d ) const override final
-	{
-		return ( d.x > 50 ) ? &destination() : nullptr;
+		if ( p.x >= dsp.width - 1 )
+		{
+			if ( d.x > 50 )
+			{
+				p.x -= dsp.width;
+				return &destination;
+			}
+		}
+		return nullptr;
 	}
 };
 
@@ -265,56 +258,71 @@ struct LeftBoundry : Boundry
 {
 	LeftBoundry( Display &dest ) : Boundry( dest ) {}
 	
-	bool isMouseOn( const Display &dsp, CGPoint p ) const override final
+	Display* didMouseLeave( const Display &dsp, CGPoint &p, CGPoint d ) const override final
 	{
-		return p.x < 1;
-	}
-	
-	Display* didMouseLeave( CGPoint, CGPoint d ) const override final
-	{
-		return ( d.x < -50 ) ? &destination() : nullptr;
+		if ( p.x < 1 )
+		{
+			if ( d.x < -50 )
+			{
+				p.x += dsp.width;
+				return &destination;
+			}
+		}
+		return nullptr;
 	}
 };
 
+// assume the first screen represents main display
+void onDisplayChange()
+{
+	auto rect = CGDisplayBounds( kCGDirectMainDisplay );
+	displays[ 0 ]->width = rect.size.width;
+	displays[ 0 ]->height = rect.size.height;
+}
+
+void onDisplayChange( CGDirectDisplayID, CGDisplayChangeSummaryFlags, void* )
+{
+	onDisplayChange();
+}
+
 CGEventRef eventCallback( CGEventTapProxy proxy, CGEventType type, CGEventRef event, void* )
 {
-	auto key = CGEventGetIntegerValueField( event, kCGKeyboardEventKeycode );
-	
-	if ( key == 63 )
-	{
-		CFRunLoopStop( CFRunLoopGetCurrent() );
-		return nullptr;
-	}
-	
-	const auto location = CGEventGetLocation( event );
-	
-	static CGPoint pos = location;
-	
-	CGPoint delta {
-		CGEventGetDoubleValueField( event, kCGMouseEventDeltaX ),
-		CGEventGetDoubleValueField( event, kCGMouseEventDeltaY )
-	};
-	
-	pos.x += delta.x;
-	pos.y += delta.y;
-	
-#if 0
-	CGEventSetLocation( event, pos );
-	sendData( event, output );
-	return nullptr;
-#endif
-	
-	if ( Display *newDisplay = currentDisplay->didMouseLeave( pos, delta ) )
-	{
-		currentDisplay->leaveScreen();
-		currentDisplay = newDisplay;
-		currentDisplay->enterScreen();
-		
-		cerr << "switch to display " << currentDisplay->name << endl;
-		pos.x = currentDisplay->width / 2;
-		pos.y = currentDisplay->height / 2;
-	}
+	static CGPoint pos = CGEventGetLocation( event );
 
+	switch ( type )
+	{
+		case kCGEventMouseMoved:
+		case kCGEventLeftMouseDragged:
+		case kCGEventRightMouseDragged:
+		{
+			CGPoint delta {
+				CGEventGetDoubleValueField( event, kCGMouseEventDeltaX ),
+				CGEventGetDoubleValueField( event, kCGMouseEventDeltaY )
+			};
+			
+			if ( ignoreNextDelta )
+			{
+				ignoreNextDelta = false;
+				delta.x = 0;
+				delta.y = 0;
+			}
+			
+			pos.x += delta.x;
+			pos.y += delta.y;
+			
+			if ( Display *newDisplay = currentDisplay->didMouseLeave( pos, delta ) )
+			{
+				currentDisplay->leaveScreen();
+				currentDisplay = newDisplay;
+				currentDisplay->enterScreen( pos, event );
+//				cerr << "switch to " << currentDisplay->name << " display" << endl;
+			}
+			break;
+		}
+		default:
+			break;
+	}
+	
 	return currentDisplay->handle( pos, event );
 }
 
@@ -326,7 +334,7 @@ void record( ostream &output )
 	
 	eventTap || error( "could not create event tap" );
 	
-	auto runLoopSource = scoped( CFMachPortCreateRunLoopSource( nullptr, eventTap, 0), &CFRelease );
+	auto runLoopSource = scoped( CFMachPortCreateRunLoopSource( nullptr, eventTap, 0 ), &CFRelease );
 	
 	runLoopSource || error( "could not create run loop" );
 	
@@ -335,8 +343,6 @@ void record( ostream &output )
 	CGEventTapEnable( eventTap, true );
 	
 	CFRunLoopRun();
-	
-	CGDisplayShowCursor( kCGDirectMainDisplay );
 }
 
 const func_type error_function = []( iter &a,iter )
@@ -462,6 +468,8 @@ void setupHostDisplay()
 	auto rect = CGDisplayBounds( kCGDirectMainDisplay );
 	displays.push_back( unique_ptr< Display >( new HostDisplay{ rect.size.width, rect.size.height, "host" } ) );
 	currentDisplay = displays.back().get();
+	
+	CGDisplayRegisterReconfigurationCallback( onDisplayChange, nullptr );
 }
 
 int main( int argc, char **argv )
@@ -484,9 +492,6 @@ int main( int argc, char **argv )
 			signal( SIGABRT, signalhandler );
 			signal( SIGQUIT, signalhandler );
 			signal( SIGKILL, signalhandler );
-			
-			CGDisplayRegisterReconfigurationCallback( onDisplayChange, nullptr );
-			onDisplayChange();
 			
 			record( output );
 		}

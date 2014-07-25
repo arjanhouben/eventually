@@ -10,10 +10,16 @@
 
 using namespace std;
 
-
 using strings = vector< string >;
 using iter = strings::const_iterator;
 using func_type = function< void( iter&, iter) >;
+
+enum class CommandType : uint8_t
+{
+	binary,
+	binaryDiff,
+	plain
+};
 
 // globals
 bool doRecord = false;
@@ -25,6 +31,7 @@ struct Display;
 vector< unique_ptr< Display > > displays;
 Display *currentDisplay;
 bool ignoreNextDelta = false;
+CommandType sentDataType = CommandType::binary;
 
 bool error( const string &err )
 {
@@ -44,17 +51,141 @@ scoped_resource< T, D > scoped( T *t, D d )
 	return scoped_resource< T, D >{ t, d };
 }
 
+vector< UInt8 > eventToVector( CGEventRef event )
+{
+	auto data = scoped( CGEventCreateData( nullptr, event ), &CFRelease );
+	uint32_t size = CFDataGetLength( data );
+	auto range = CFRangeMake( 0, size );
+	vector< UInt8 > result( size );
+	CFDataGetBytes( data, range, result.data() );
+	return result;
+}
+
+struct BinaryCommand : vector< UInt8 >
+{
+	BinaryCommand( CGEventRef event ) :
+		vector< UInt8 >( eventToVector( event ) ) {}
+};
+
+ostream& operator << ( ostream &stream, const BinaryCommand &cmd )
+{
+	uint16_t size = cmd.size();
+	CommandType type = CommandType::binary;
+	stream.write( reinterpret_cast< const char* >( &size ), sizeof( size ) );
+	stream.write( reinterpret_cast< const char* >( &type ), sizeof( type ) );
+	stream.write( reinterpret_cast< const char* >( cmd.data() ), cmd.size() );
+	return stream;
+}
+
+vector< UInt8 > diff( const vector< UInt8 > &old, const vector< UInt8 > &newdata )
+{
+	vector< UInt8 > diffdata;
+	
+	if ( old.size() == newdata.size() )
+	{
+		diffdata.push_back( 0 );
+		UInt8 *count = &diffdata.back();
+		diffdata.push_back( 0 );
+		UInt8 *diff = &diffdata.back();
+		
+		for ( size_t i = 0; i < old.size(); ++i )
+		{
+			*diff = old[ i ] - newdata[ i ];
+			if ( *diff || *count == 255 )
+			{
+				diffdata.push_back( 0 );
+				count = &diffdata.back();
+				diffdata.push_back( 0 );
+				diff = &diffdata.back();
+			}
+			else
+			{
+				++(*count);
+			}
+		}
+	}
+	
+	return diffdata;
+}
+
+vector< UInt8 > undiff( vector< UInt8 > &result, const vector< UInt8 > &newdata )
+{
+	auto i = result.begin();
+	newdata.size() & 1 && error( "diffdata is incorrect" );
+	auto d = newdata.begin();
+	while ( i != result.end() && d != newdata.end() )
+	{
+		advance( i, *d++ );
+		*i -= *d++;
+	}
+	return result;
+}
+
+struct BinaryDiffCommand : vector< UInt8 >
+{
+	BinaryDiffCommand( CGEventRef event ) :
+		vector< UInt8 >( eventToVector( event ) ),
+		originalSize( size() )
+	{
+		static map< size_t, vector< UInt8 > > cache;
+		auto d = diff( cache[ size() ], *this );
+		cache[ size() ] = *this;
+		if ( !d.empty() )
+		{
+			swap( d );
+		}
+	}
+	
+	uint16_t originalSize;
+};
+
+ostream& operator << ( ostream &stream, const BinaryDiffCommand &cmd )
+{
+	uint16_t size = cmd.size();
+	CommandType type = CommandType::binaryDiff;
+	stream.write( reinterpret_cast< const char* >( &cmd.originalSize ), sizeof( cmd.originalSize ) );
+	stream.write( reinterpret_cast< const char* >( &type ), sizeof( type ) );
+	stream.write( reinterpret_cast< const char* >( &size ), sizeof( size ) );
+	stream.write( reinterpret_cast< const char* >( cmd.data() ), cmd.size() );
+	return stream;
+}
+
 void playback( istream &input )
 {
 	vector< UInt8 > buffer;
 	
-	for ( uint32_t size = 0; input.read( reinterpret_cast< char* >( &size ), sizeof( size ) ); )
+	for ( uint16_t size = 0; input.read( reinterpret_cast< char* >( &size ), sizeof( size ) ); )
 	{
-		buffer.resize( size );
+		CommandType type;
+		input.read( reinterpret_cast< char* >( &type ), sizeof( type ) );
 		
-		input.read( reinterpret_cast< char* >( buffer.data() ), size );
-
-		input.gcount() == size || error( "could not read event data" );
+		switch ( type )
+		{
+			case CommandType::binary:
+			{
+				buffer.resize( size );
+				input.read( reinterpret_cast< char* >( buffer.data() ), buffer.size() );
+				input.gcount() == buffer.size() || error( "could not read event data" );
+				break;
+			}
+			case CommandType::binaryDiff:
+			{
+				uint16_t diffsize = 0;
+				input.read( reinterpret_cast< char* >( &diffsize ), sizeof( diffsize ) );
+				buffer.resize( diffsize );
+				input.read( reinterpret_cast< char* >( buffer.data() ), buffer.size() );
+				input.gcount() == buffer.size() || error( "could not read event data" );
+				if ( diffsize != size )
+				{
+					static map< size_t, vector< UInt8 > > cache;
+					if ( cache[ size ].size() != size ) cache[ size ].resize( size );
+					buffer = undiff( cache[ size ], buffer );
+				}
+				break;
+			}
+			default:
+				error( "unknown commandtype: " + to_string( static_cast< uint8_t >( type ) ) );
+		}
 		
 		auto data = scoped( CFDataCreate( nullptr, buffer.data(), size ), &CFRelease );
 		
@@ -66,16 +197,18 @@ void playback( istream &input )
 
 void sendData( CGEventRef event, ostream &output )
 {
-	auto data = scoped( CGEventCreateData( nullptr, event ), &CFRelease );
-	uint32_t size = CFDataGetLength( data );
-	auto range = CFRangeMake( 0, size );
-	
-	static vector< UInt8 > buffer;
-	buffer.resize( size );
-	CFDataGetBytes( data, range, buffer.data() );
-	
-	output.write( reinterpret_cast< const char* >( &size ), sizeof( size ) );
-	output.write( reinterpret_cast< const char* >( buffer.data() ), buffer.size() );
+	switch ( sentDataType )
+	{
+		case CommandType::binary:
+			output << BinaryCommand( event );
+			break;
+		case CommandType::binaryDiff:
+			output << BinaryDiffCommand( event );
+			break;
+		default:
+			error( "unsupported output command" );
+			break;
+	}
 	
 	output.flush();
 }
@@ -444,6 +577,33 @@ function< void( iter &size, iter end ) > setScreen( Border b )
 	}
 }
 
+void setOutputType( iter &type, iter end )
+{
+	const string options( "binary, bdiff and plain" );
+	
+	++type != end || error( "please specify which output type you which to use, choose from " + options );
+	
+	static map< string, CommandType > lookup {
+		{ "binary", CommandType::binary },
+		{ "bdiff", CommandType::binaryDiff },
+		{ "plain", CommandType::plain }
+	};
+	
+	switch ( lookup[ *type ] )
+	{
+		case CommandType::binary:
+		case CommandType::binaryDiff:
+		case CommandType::plain:
+			sentDataType = lookup[ *type ];
+			break;
+		default:
+			error( "unknown outputtype \'" + *type + "\', please choose from " + options );
+			break;
+	}
+	
+	++type;
+}
+
 map< string, defaultfunc > handleArguments {
 	{ "--record", setRecord },
 	{ "-r", setRecord },
@@ -455,6 +615,7 @@ map< string, defaultfunc > handleArguments {
 	{ "-right", setScreen( Border::Right ) },
 	{ "-bottom", setScreen( Border::Bottom ) },
 	{ "-left", setScreen( Border::Left ) },
+	{ "-type", setOutputType },
 };
 
 void signalhandler( int )
@@ -486,11 +647,11 @@ int main( int argc, char **argv )
 		
 		if ( doRecord )
 		{
-			signal( SIGTERM, signalhandler );
-			signal( SIGSTOP, signalhandler );
-			signal( SIGABRT, signalhandler );
-			signal( SIGQUIT, signalhandler );
-			signal( SIGKILL, signalhandler );
+			signal( SIGHUP, signalhandler ) && error( "can't catch SIGHUP" );
+			signal( SIGINT, signalhandler ) && error( "can't catch SIGINT" );
+			signal( SIGQUIT, signalhandler ) && error( "can't catch SIGQUIT" );
+			signal( SIGABRT, signalhandler ) && error( "can't catch SIGABRT" );
+			signal( SIGTERM, signalhandler ) && error( "can't catch SIGTERM" );
 			
 			record( output );
 		}

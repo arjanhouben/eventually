@@ -23,8 +23,6 @@ do
 	esac
 done
 
-echo "FKEF " $rootinstall
-
 if [ $rootinstall == true ]
 then
 	instdir=/usr/local

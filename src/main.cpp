@@ -3,6 +3,7 @@
 #include <map>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
 
 #include "ApplicationServices/ApplicationServices.h"
 
@@ -22,7 +23,12 @@ enum class CommandType : uint8_t
 };
 
 // globals
-bool doRecord = false;
+enum class Mode
+{
+	playback,
+	record,
+	help
+} mode = Mode::playback;
 ostream &output( cout );
 istream &input( cin );
 ofstream outputFile;
@@ -80,14 +86,14 @@ ostream& operator << ( ostream &stream, const BinaryCommand &cmd )
 vector< UInt8 > diff( const vector< UInt8 > &old, const vector< UInt8 > &newdata )
 {
 	vector< UInt8 > diffdata;
-	
+
 	if ( old.size() == newdata.size() )
 	{
 		diffdata.push_back( 0 );
 		UInt8 *count = &diffdata.back();
 		diffdata.push_back( 0 );
 		UInt8 *diff = &diffdata.back();
-		
+
 		for ( size_t i = 0; i < old.size(); ++i )
 		{
 			*diff = old[ i ] - newdata[ i ];
@@ -104,7 +110,7 @@ vector< UInt8 > diff( const vector< UInt8 > &old, const vector< UInt8 > &newdata
 			}
 		}
 	}
-	
+
 	return diffdata;
 }
 
@@ -135,7 +141,7 @@ struct BinaryDiffCommand : vector< UInt8 >
 			swap( d );
 		}
 	}
-	
+
 	uint16_t originalSize;
 };
 
@@ -153,12 +159,12 @@ ostream& operator << ( ostream &stream, const BinaryDiffCommand &cmd )
 void playback( istream &input )
 {
 	vector< UInt8 > buffer;
-	
+
 	for ( uint16_t size = 0; input.read( reinterpret_cast< char* >( &size ), sizeof( size ) ); )
 	{
 		CommandType type;
 		input.read( reinterpret_cast< char* >( &type ), sizeof( type ) );
-		
+
 		switch ( type )
 		{
 			case CommandType::binary:
@@ -186,11 +192,11 @@ void playback( istream &input )
 			default:
 				error( "unknown commandtype: " + to_string( static_cast< uint8_t >( type ) ) );
 		}
-		
+
 		auto data = scoped( CFDataCreate( nullptr, buffer.data(), size ), &CFRelease );
-		
+
 		auto event = scoped( CGEventCreateFromData( nullptr, data ), &CFRelease );
-		
+
 		CGEventPost( kCGHIDEventTap, event );
 	}
 }
@@ -209,7 +215,7 @@ void sendData( CGEventRef event, ostream &output )
 			error( "unsupported output command" );
 			break;
 	}
-	
+
 	output.flush();
 }
 
@@ -230,18 +236,18 @@ extern "C" void CGSSetConnectionProperty( CGSConnectionID, CGSConnectionID, CFSt
 
 void hideMouseHack()
 {
-    auto propertyString = scoped( CFStringCreateWithCString( nullptr, "SetsCursorInBackground", kCFStringEncodingUTF8 ), &CFRelease );
-    CGSSetConnectionProperty( _CGSDefaultConnection(), _CGSDefaultConnection(), propertyString, kCFBooleanTrue );
-	
-    CGDisplayHideCursor( kCGDirectMainDisplay );
+	auto propertyString = scoped( CFStringCreateWithCString( nullptr, "SetsCursorInBackground", kCFStringEncodingUTF8 ), &CFRelease );
+	CGSSetConnectionProperty( _CGSDefaultConnection(), _CGSDefaultConnection(), propertyString, kCFBooleanTrue );
+
+	CGDisplayHideCursor( kCGDirectMainDisplay );
 }
 
 void showMouse()
 {
-    auto propertyString = scoped( CFStringCreateWithCString( nullptr, "SetsCursorInBackground", kCFStringEncodingUTF8 ), &CFRelease );
-    CGSSetConnectionProperty( _CGSDefaultConnection(), _CGSDefaultConnection(), propertyString, kCFBooleanFalse );
-	
-    CGDisplayShowCursor( kCGDirectMainDisplay );
+	auto propertyString = scoped( CFStringCreateWithCString( nullptr, "SetsCursorInBackground", kCFStringEncodingUTF8 ), &CFRelease );
+	CGSSetConnectionProperty( _CGSDefaultConnection(), _CGSDefaultConnection(), propertyString, kCFBooleanFalse );
+
+	CGDisplayShowCursor( kCGDirectMainDisplay );
 }
 
 struct Display;
@@ -251,9 +257,9 @@ class Boundry
 	public:
 		Boundry( Display &dest ) :
 			destination( dest ) {}
-	
+
 		Display& destination;
-	
+
 		virtual ~Boundry() {}
 		virtual Display* didMouseLeave( const Display&, CGPoint&, CGPoint ) const = 0;
 	private:
@@ -266,20 +272,20 @@ struct Display
 		height( h ),
 		name( n ),
 		boundries() {}
-	
+
 	double width, height;
 	string name;
 	vector< unique_ptr< Boundry > > boundries;
-	
+
 	virtual ~Display() {}
-	
+
 	virtual CGEventRef handle( CGPoint &p, CGEventRef event )
 	{
 		CGEventSetLocation( event, clamp( p ) );
 		sendData( event, output );
 		return nullptr;
 	}
-	
+
 	Display* didMouseLeave( CGPoint &pos, const CGPoint&delta ) const
 	{
 		for ( auto &b : boundries )
@@ -291,18 +297,18 @@ struct Display
 		}
 		return nullptr;
 	}
-	
+
 	CGPoint clamp( CGPoint &p ) const
 	{
 		p.x = ::clamp< double >( p.x, 0, width );
 		p.y = ::clamp< double >( p.y, 0, height );
 		return p;
 	}
-	
+
 	virtual void leaveScreen()
 	{
 	}
-	
+
 	virtual void enterScreen( CGPoint pos, CGEventRef event )
 	{
 	}
@@ -311,18 +317,18 @@ struct Display
 struct HostDisplay : Display
 {
 	HostDisplay( double w, double h, const string &n ) : Display( w, h, n ) {}
-	
+
 	virtual CGEventRef handle( CGPoint&pos, CGEventRef event ) override final
 	{
 		pos = CGEventGetLocation( event );
 		return event;
 	}
-	
+
 	virtual void leaveScreen() override final
 	{
 		hideMouseHack();
 	}
-	
+
 	virtual void enterScreen( CGPoint pos, CGEventRef event ) override final
 	{
 		showMouse();
@@ -335,7 +341,7 @@ struct HostDisplay : Display
 struct TopBoundry : Boundry
 {
 	TopBoundry( Display &dest ) : Boundry( dest ) {}
-	
+
 	Display* didMouseLeave( const Display &dsp, CGPoint &p, CGPoint d ) const override final
 	{
 		if ( p.y <= 1 )
@@ -353,7 +359,7 @@ struct TopBoundry : Boundry
 struct BottomBoundry : Boundry
 {
 	BottomBoundry( Display &dest ) : Boundry( dest ) {}
-	
+
 	Display* didMouseLeave( const Display &dsp, CGPoint &p, CGPoint d ) const override final
 	{
 		if ( p.y >= dsp.height - 1 )
@@ -371,7 +377,7 @@ struct BottomBoundry : Boundry
 struct RightBoundry : Boundry
 {
 	RightBoundry( Display &dest ) : Boundry( dest ) {}
-	
+
 	Display* didMouseLeave( const Display &dsp, CGPoint &p, CGPoint d ) const override final
 	{
 		if ( p.x >= dsp.width - 1 )
@@ -389,7 +395,7 @@ struct RightBoundry : Boundry
 struct LeftBoundry : Boundry
 {
 	LeftBoundry( Display &dest ) : Boundry( dest ) {}
-	
+
 	Display* didMouseLeave( const Display &dsp, CGPoint &p, CGPoint d ) const override final
 	{
 		if ( p.x < 1 )
@@ -404,17 +410,12 @@ struct LeftBoundry : Boundry
 	}
 };
 
-// assume the first screen represents main display
-void onDisplayChange()
+void onDisplayChange( CGDirectDisplayID, CGDisplayChangeSummaryFlags, void *rawdisplay )
 {
 	auto rect = CGDisplayBounds( kCGDirectMainDisplay );
-	displays[ 0 ]->width = rect.size.width;
-	displays[ 0 ]->height = rect.size.height;
-}
-
-void onDisplayChange( CGDirectDisplayID, CGDisplayChangeSummaryFlags, void* )
-{
-	onDisplayChange();
+	auto display = static_cast< Display* >( rawdisplay );
+	display->width = rect.size.width;
+	display->height = rect.size.height;
 }
 
 CGEventRef eventCallback( CGEventTapProxy proxy, CGEventType type, CGEventRef event, void* )
@@ -431,17 +432,17 @@ CGEventRef eventCallback( CGEventTapProxy proxy, CGEventType type, CGEventRef ev
 				CGEventGetDoubleValueField( event, kCGMouseEventDeltaX ),
 				CGEventGetDoubleValueField( event, kCGMouseEventDeltaY )
 			};
-			
+
 			if ( ignoreNextDelta )
 			{
 				ignoreNextDelta = false;
 				delta.x = 0;
 				delta.y = 0;
 			}
-			
+
 			pos.x += delta.x;
 			pos.y += delta.y;
-			
+
 			if ( Display *newDisplay = currentDisplay->didMouseLeave( pos, delta ) )
 			{
 				currentDisplay->leaveScreen();
@@ -454,26 +455,26 @@ CGEventRef eventCallback( CGEventTapProxy proxy, CGEventType type, CGEventRef ev
 		default:
 			break;
 	}
-	
+
 	return currentDisplay->handle( pos, event );
 }
 
 void record( ostream &output )
 {
 	auto eventMask = ~0;
-	
+
 	auto eventTap = scoped( CGEventTapCreate( kCGHIDEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, eventMask, eventCallback, &output ), &CFRelease );
-	
+
 	eventTap || error( "could not create event tap" );
-	
+
 	auto runLoopSource = scoped( CFMachPortCreateRunLoopSource( nullptr, eventTap, 0 ), &CFRelease );
-	
+
 	runLoopSource || error( "could not create run loop" );
-	
+
 	CFRunLoopAddSource( CFRunLoopGetCurrent(), runLoopSource, kCFRunLoopCommonModes );
-	
+
 	CGEventTapEnable( eventTap, true );
-	
+
 	CFRunLoopRun();
 }
 
@@ -485,19 +486,23 @@ const func_type error_function = []( iter &a,iter )
 struct defaultfunc : func_type
 {
 	template < typename T = func_type >
-	defaultfunc( T t = error_function ) : func_type( t ) {}
+	defaultfunc( T t = error_function, string txt = string() ) :
+		func_type( t ),
+		help( txt ) {}
+
+	string help;
 };
 
 void setRecord( iter &i, iter )
 {
 	++i;
-	doRecord = true;
+	mode = Mode::record;
 }
 
 void setOutput( iter &file, iter end )
 {
 	++file != end || error( "please supply filename for output" );
-	
+
 	outputFile = ofstream( *file++, ios::binary );
 
 	output.rdbuf( outputFile.rdbuf() );
@@ -506,7 +511,7 @@ void setOutput( iter &file, iter end )
 void setInput( iter &file, iter end )
 {
 	++file != end || error( "please supply filename for input" );
-	
+
 	inputFile = ifstream( *file++, ios::binary );
 	input.rdbuf( inputFile.rdbuf() );
 }
@@ -514,17 +519,17 @@ void setInput( iter &file, iter end )
 Display& getDisplay( iter &size, iter end, const string &name )
 {
 	++size != end || error( "please supply size for " + name + " screen ( <width> <height> )" );
-	
+
 	double w = 0, h = 0;
-	
+
 	istringstream( *size++ ) >> w;
 	w >= 640 || error( "width has to be at least 640, was " + to_string( w ) );
-	
+
 	istringstream( *size++ ) >> h;
 	h >= 480 || error( "height has to be at least 480, was " + to_string( h ) );
-	
+
 	displays.push_back( unique_ptr< Display >( new Display{ w, h, name } ) );
-	
+
 	return *displays.back();
 }
 
@@ -580,15 +585,15 @@ function< void( iter &size, iter end ) > setScreen( Border b )
 void setOutputType( iter &type, iter end )
 {
 	const string options( "binary, bdiff and plain" );
-	
+
 	++type != end || error( "please specify which output type you which to use, choose from " + options );
-	
+
 	static map< string, CommandType > lookup {
 		{ "binary", CommandType::binary },
 		{ "bdiff", CommandType::binaryDiff },
 		{ "plain", CommandType::plain }
 	};
-	
+
 	switch ( lookup[ *type ] )
 	{
 		case CommandType::binary:
@@ -600,22 +605,60 @@ void setOutputType( iter &type, iter end )
 			error( "unknown outputtype \'" + *type + "\', please choose from " + options );
 			break;
 	}
-	
+
 	++type;
 }
 
-map< string, defaultfunc > handleArguments {
-	{ "--record", setRecord },
-	{ "-r", setRecord },
-	{ "--output", setOutput },
-	{ "-o", setOutput },
-	{ "--input", setInput },
-	{ "-i", setInput },
-	{ "-top", setScreen( Border::Top ) },
-	{ "-right", setScreen( Border::Right ) },
-	{ "-bottom", setScreen( Border::Bottom ) },
-	{ "-left", setScreen( Border::Left ) },
-	{ "-type", setOutputType },
+
+void showHelp( iter &i, iter end )
+{
+	mode = Mode::help;
+	i = end;
+}
+
+const string example( "example:~$ " );
+
+string setScreenHelp( Border side )
+{
+	string name;
+	switch ( side )
+	{
+		case Border::Top:
+			name = "top";
+			break;
+		case Border::Right:
+			name = "right";
+			break;
+		case Border::Bottom:
+			name = "bottom";
+			break;
+		case Border::Left:
+			name = "left";
+			break;
+	}
+	return "add an 'output' screen on " + name + " of the host window with specified width and height.";
+}
+
+map< string, defaultfunc > commandlineOptions {
+	{ "--help", { showHelp, "show this info" } },
+	{ "-h", { showHelp, "shorthand for --help" } },
+	{ "--record", { setRecord, "use this to record and then serialize events" } },
+	{ "-r", { setRecord, "shorthand for --record" } },
+	{ "--output", { setOutput, "determine where the serialized output should go, defaults to stdout" } },
+	{ "-o", { setOutput, "shorthand for --output" } },
+	{ "--input", { setInput, "determines from where the serialized input should be read, defaults to stdin" } },
+	{ "-i", { setInput, "shorthand for --input" } },
+	{ "-top", { setScreen( Border::Top ), setScreenHelp( Border::Top ) } },
+	{ "-right", { setScreen( Border::Right ), setScreenHelp( Border::Right ) } },
+	{ "-bottom", { setScreen( Border::Bottom ), setScreenHelp( Border::Bottom ) } },
+	{ "-left", { setScreen( Border::Left ), setScreenHelp( Border::Left ) } },
+	{ "-type",
+		{
+			setOutputType,
+			"determines the type of output generated by serializing the events.\n"
+			"possible options are binary(default), bdiff and plain"
+		}
+	}
 };
 
 void signalhandler( int )
@@ -628,8 +671,8 @@ void setupHostDisplay()
 	auto rect = CGDisplayBounds( kCGDirectMainDisplay );
 	displays.push_back( unique_ptr< Display >( new HostDisplay{ rect.size.width, rect.size.height, "host" } ) );
 	currentDisplay = displays.back().get();
-	
-	CGDisplayRegisterReconfigurationCallback( onDisplayChange, nullptr );
+
+	CGDisplayRegisterReconfigurationCallback( onDisplayChange, currentDisplay );
 }
 
 int main( int argc, char **argv )
@@ -637,33 +680,58 @@ int main( int argc, char **argv )
 	try
 	{
 		const strings args( argv + 1, argv + argc );
-		
+
 		setupHostDisplay();
 
 		for ( auto start = args.begin(), end = args.end(); start != end; )
 		{
-			handleArguments[ *start ]( start, end );
+			commandlineOptions[ *start ]( start, end );
 		}
-		
-		if ( doRecord )
+
+		switch ( mode )
 		{
-			signal( SIGHUP, signalhandler ) && error( "can't catch SIGHUP" );
-			signal( SIGINT, signalhandler ) && error( "can't catch SIGINT" );
-			signal( SIGQUIT, signalhandler ) && error( "can't catch SIGQUIT" );
-			signal( SIGABRT, signalhandler ) && error( "can't catch SIGABRT" );
-			signal( SIGTERM, signalhandler ) && error( "can't catch SIGTERM" );
-			
-			record( output );
-		}
-		else
-		{
-			playback( input );
+			case Mode::record:
+			{
+				signal( SIGHUP, signalhandler ) && error( "can't catch SIGHUP" );
+				signal( SIGINT, signalhandler ) && error( "can't catch SIGINT" );
+				signal( SIGQUIT, signalhandler ) && error( "can't catch SIGQUIT" );
+				signal( SIGABRT, signalhandler ) && error( "can't catch SIGABRT" );
+				signal( SIGTERM, signalhandler ) && error( "can't catch SIGTERM" );
+
+				record( output );
+				break;
+			}
+			case Mode::playback:
+			{
+				playback( input );
+				break;
+			}
+			case Mode::help:
+			{
+				for ( auto &commandlineOption : commandlineOptions )
+				{
+					cout << setw( 10 ) << left << commandlineOption.first << " : " << commandlineOption.second.help << endl;
+				}
+
+				cout << "\nsome examples:\n"
+					 << "# start listening for events on stdin, and play them back on this machine\n"
+					 << "eventually\n\n"
+					 << "# add a virtual screen left of the host, with a size of 1400 by 900.\n"
+					 << "# events are recorded to a file named 'events'\n"
+					 << "eventually -r -left 1400 900 -o events\n\n"
+					 << "# add a virtual screen left of the host, with a size of 1400 by 900.\n"
+					 << "# events are recorded to stdout and then piped through ssh, which starts\n"
+					 << "# an instance of eventually on the client which then executes the events\n"
+					 << "eventually -r -left 1400 900 | ssh <client_ip> \"eventually\"" << endl;
+
+				break;
+			}
 		}
 	}
 	catch ( const exception &err )
 	{
 		cerr << err.what() << endl;
 	}
-	
+
 	return 0;
 }
